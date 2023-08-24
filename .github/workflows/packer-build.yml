@@ -1,0 +1,46 @@
+name: packer-hcl
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+       - main
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+  SOURCE_AMI: ${{ secrets.SOURCE_AMI }}
+  SSH_USERNAME: ${{ secrets.SSH_USR }}
+  LT_NAME: ${{ secrets.LT_NAME }}
+  ASG_NAME: ${{ secrets.ASG_NAME }}
+
+jobs:
+  merge:
+    if: github.event.pull_request.merged
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Git Repository
+        uses: actions/checkout@v2
+
+      - name: Zip Git Repository
+        uses: montudor/action-zip@v1
+        with:
+          args: zip -r webapp.zip .
+
+      - name: Packer build
+        id: packer_build
+        uses: hashicorp/packer-github-actions@master
+        with:
+          command: build
+          target: ./packer/ami.pkr.hcl
+          working_directory: .
+
+      - name: Get the AMI ID and latest template version and Create a new launch template version from AMI and refresh the ASG with new launch template version
+        run: |
+            export AWS_ACCESS_KEY_ID=${{ secrets.PROD_AWS_ACCESS_KEY_ID }} && export AWS_SECRET_ACCESS_KEY=${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
+            AMI_ID=`aws ec2 describe-images --filters "Name=name,Values=csye6225*" --query 'reverse(sort_by(Images, &CreationDate))[:1].ImageId' --output text`
+            latest_version=$(aws ec2 describe-launch-template-versions --launch-template-name $LT_NAME --query 'reverse(sort_by(LaunchTemplateVersions, &VersionNumber))[0].VersionNumber')
+            aws ec2 create-launch-template-version --launch-template-name "$LT_NAME" --source-version "$latest_version" --launch-template-data '{"ImageId":"'"$AMI_ID"'"}'
+            aws autoscaling start-instance-refresh --auto-scaling-group-name "$ASG_NAME" --strategy Rolling --preferences '{"MinHealthyPercentage":100,"InstanceWarmup":60}'
